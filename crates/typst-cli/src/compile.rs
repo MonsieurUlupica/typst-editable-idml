@@ -1,3 +1,4 @@
+// Modified for Jean Porcel’s Typst Editable SVG extension (2026). See DEVELOPMENT.md.
 use std::ffi::OsStr;
 use std::path::Path;
 
@@ -25,7 +26,7 @@ use typst_utils::Scalar;
 
 use crate::args::{
     self, CompileArgs, CompileCommand, DepsFormat, DiagnosticFormat, Input, Output,
-    OutputFormat, WatchCommand,
+    OutputFormat, SvgTextOutput, WatchCommand,
 };
 use crate::deps::write_deps;
 use crate::watch::Status;
@@ -64,6 +65,8 @@ pub struct CompileConfig {
     pub output_format: OutputFormat,
     /// Whether to make the serialized document pretty.
     pub pretty: Option<bool>,
+    /// How text is represented in SVG output.
+    pub svg_text_mode: typst_svg::SvgTextMode,
     /// Which pages to export.
     pub pages: Option<PageRanges>,
     /// The document's creation date formatted as a UNIX timestamp, with UTC suffix.
@@ -127,6 +130,14 @@ impl CompileConfig {
             }
         } else {
             OutputFormat::Pdf
+        };
+
+        let svg_text_mode = match args.svg_text {
+            Some(_) if output_format != OutputFormat::Svg => {
+                bail!("`--svg-text` can only be used with SVG output")
+            }
+            Some(SvgTextOutput::Outline) | None => typst_svg::SvgTextMode::Outline,
+            Some(SvgTextOutput::Hybrid) => typst_svg::SvgTextMode::Hybrid,
         };
 
         let output = args.output.clone().unwrap_or_else(|| {
@@ -257,6 +268,7 @@ impl CompileConfig {
             output,
             output_format,
             pretty: args.pretty,
+            svg_text_mode,
             pages,
             pdf_standards,
             tagged,
@@ -391,9 +403,7 @@ fn export_paged(
         OutputFormat::Png => export_image(document, config, ImageExportFormat::Png)
             .at(Span::detached())
             .into(),
-        OutputFormat::Svg => export_image(document, config, ImageExportFormat::Svg)
-            .at(Span::detached())
-            .into(),
+        OutputFormat::Svg => export_svg(document, config),
         OutputFormat::Html | OutputFormat::Bundle => unreachable!(),
     }
 }
@@ -486,7 +496,6 @@ fn convert_datetime<Tz: chrono::TimeZone>(
 #[derive(Copy, Clone)]
 enum ImageExportFormat {
     Png,
-    Svg,
 }
 
 /// Export to one or multiple images.
@@ -499,7 +508,7 @@ fn export_image(
         ImageExportFormat::Png => {
             let options =
                 png_options(config).resolve(document.options().get::<PngFormat>());
-            export_image_pages(config, document, |page, output| {
+            export_image_pages(config, document, |page, output, _page_number| {
                 let pixmap = typst_render::render(page, &options);
                 let buf = pixmap
                     .encode_png()
@@ -507,20 +516,46 @@ fn export_image(
                 output
                     .write(&buf)
                     .map_err(|err| eco_format!("failed to write PNG file ({err})"))?;
-                Ok(())
+                Ok(Vec::new())
             })
+            .map(|(outputs, _warnings)| outputs)
         }
-        ImageExportFormat::Svg => {
-            let options =
-                svg_options(config).resolve(document.options().get::<SvgFormat>());
-            export_image_pages(config, document, |page, output| {
-                let svg = typst_svg::svg(page, &options);
-                output
-                    .write(svg.as_bytes())
-                    .map_err(|err| eco_format!("failed to write SVG file ({err})"))?;
-                Ok(())
-            })
-        }
+    }
+}
+
+/// Export SVG pages, propagating hybrid SVG fallback warnings.
+fn export_svg(
+    document: &PagedDocument,
+    config: &CompileConfig,
+) -> Warned<SourceResult<Vec<Output>>> {
+    let options = svg_options(config).resolve(document.options().get::<SvgFormat>());
+    match export_image_pages(config, document, |page, output, page_number| {
+        let result = typst_svg::try_svg_with_text_mode(
+            page,
+            &options,
+            config.svg_text_mode,
+            page_number,
+        )?;
+        output
+            .write(result.svg.as_bytes())
+            .map_err(|err| eco_format!("failed to write SVG file ({err})"))?;
+        Ok(result
+            .warnings
+            .into_iter()
+            .map(|warning| warning.to_string())
+            .collect())
+    }) {
+        Ok((outputs, warnings)) => Warned {
+            output: Ok(outputs),
+            warnings: warnings
+                .iter()
+                .map(|warning| typst::diag::warning!(Span::detached(), "{}", warning))
+                .collect(),
+        },
+        Err(error) => Warned {
+            output: Err(vec![typst::diag::error!(Span::detached(), "{}", error)].into()),
+            warnings: Vec::new().into(),
+        },
     }
 }
 
@@ -530,9 +565,9 @@ fn export_image_pages<F>(
     config: &CompileConfig,
     document: &PagedDocument,
     export_image_page: F,
-) -> StrResult<Vec<Output>>
+) -> StrResult<(Vec<Output>, Vec<String>)>
 where
-    F: Fn(&Page, &Output) -> StrResult<()>,
+    F: Fn(&Page, &Output, usize) -> StrResult<Vec<String>>,
     F: Send + Sync,
 {
     // Determine whether we have indexable templates in output
@@ -590,7 +625,7 @@ where
                         && config.export_cache.is_cached(*i, page)
                         && path.exists()
                     {
-                        return Ok(Output::Path(path.to_owned()));
+                        return Ok((Output::Path(path.to_owned()), Vec::new()));
                     }
 
                     Output::Path(path.to_owned())
@@ -598,11 +633,20 @@ where
                 Output::Stdout => Output::Stdout,
             };
 
-            export_image_page(page, &output)?;
+            let warnings = export_image_page(page, &output, i + 1)?;
 
-            Ok(output)
+            Ok((output, warnings))
         })
-        .collect::<StrResult<Vec<Output>>>()
+        .collect::<StrResult<Vec<_>>>()
+        .map(|results| {
+            let mut outputs = Vec::with_capacity(results.len());
+            let mut warnings = Vec::new();
+            for (output, page_warnings) in results {
+                outputs.push(output);
+                warnings.extend(page_warnings);
+            }
+            (outputs, warnings)
+        })
 }
 
 mod output_template {

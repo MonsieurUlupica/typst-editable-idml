@@ -1,3 +1,4 @@
+<!-- Modified for Jean Porcel’s Typst Editable SVG extension (2026). See DEVELOPMENT.md. -->
 # Typst Compiler Architecture
 Wondering how to contribute or just curious how Typst works? This document
 covers the general structure and architecture of Typst's compiler, so you get an
@@ -154,6 +155,10 @@ format.
 - HTML export does not exist yet, but will in the future. However, this requires
   some complex compiler work because the export will start with `Content`
   instead of `Frames` (layout is the browser's job).
+
+The standalone SVG exporter can optionally retain supported text as live SVG
+text for editing in vector editors. See [the editable SVG export
+guide](editable-svg.md) for its scope and CLI options.
 
 
 ## IDE

@@ -1,3 +1,4 @@
+// Modified for Jean Porcel’s Typst Editable SVG extension (2026). See DEVELOPMENT.md.
 // This module is imported both from the `typst-cli` crate itself
 // and from its build script. In this module, you can only import from crates
 // that are both runtime and build dependencies of this crate, or else
@@ -359,6 +360,10 @@ pub struct CompileArgs {
     #[arg(long = "format", short = 'f')]
     pub format: Option<OutputFormat>,
 
+    /// How text is represented when exporting SVG. Only valid with SVG output.
+    #[arg(long = "svg-text", value_enum, value_name = "MODE")]
+    pub svg_text: Option<SvgTextOutput>,
+
     /// World arguments.
     #[clap(flatten)]
     pub world: WorldArgs,
@@ -665,6 +670,16 @@ pub enum OutputFormat {
     Svg,
     Html,
     Bundle,
+}
+
+/// How text is represented in a standalone SVG export.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum SvgTextOutput {
+    /// Convert all text to glyph outlines.
+    Outline,
+    /// Keep supported text editable and outline unsupported runs.
+    Hybrid,
 }
 
 impl OutputFormat {

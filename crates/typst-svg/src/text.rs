@@ -1,15 +1,17 @@
+// Modified for Jean Porcel’s Typst Editable SVG extension (2026). See DEVELOPMENT.md.
 use ecow::EcoString;
 use ttf_parser::GlyphId;
+use typst_library::layout::Dir;
 use typst_library::layout::{Abs, Ratio, Size, Transform};
-use typst_library::text::TextItem;
 use typst_library::text::color::{
     GlyphFrame, GlyphFrameItem, glyph_frame, should_outline,
 };
+use typst_library::text::{FontFlags, TextItem, is_default_ignorable};
 use typst_library::visualize::{FillRule, Paint, RelativeTo};
 
 use crate::path::SvgPathBuilder;
-use crate::write::{SvgElem, SvgIdRef, SvgTransform};
-use crate::{DedupId, SVGRenderer, State};
+use crate::write::{SvgElem, SvgIdRef, SvgTransform, SvgWrite};
+use crate::{DedupId, SVGRenderer, State, SvgTextMode};
 
 /// Represents a glyph to be rendered.
 #[derive(Clone)]
@@ -32,6 +34,11 @@ impl SVGRenderer<'_> {
         state: &State,
         text: &TextItem,
     ) {
+        if self.text_mode == SvgTextMode::Hybrid && can_render_live_text(text) {
+            self.render_live_text(svg, state, text);
+            return;
+        }
+
         let svg = &mut svg.elem("g");
 
         // Flip the transform since fonts use a Y-Up coordinate system.
@@ -50,6 +57,51 @@ impl SVGRenderer<'_> {
             x += glyph.x_advance.at(text.size);
             y += glyph.y_advance.at(text.size);
         }
+    }
+
+    /// Render a simple text run as an SVG text object.
+    fn render_live_text(&mut self, svg: &mut SvgElem, state: &State, text: &TextItem) {
+        let mut element = svg.elem("text");
+        if !state.transform.is_identity() {
+            element.attr("transform", SvgTransform(state.transform));
+        }
+
+        let font = text.font.font();
+        let info = font.info();
+        let variant = info.variant;
+        element
+            .attr("x", 0.0)
+            .attr("y", 0.0)
+            .attr("font-family", info.family.as_str())
+            .attr("font-size", text.size.to_pt())
+            .attr(
+                "font-style",
+                match variant.style {
+                    typst_library::text::FontStyle::Normal => "normal",
+                    typst_library::text::FontStyle::Italic => "italic",
+                    typst_library::text::FontStyle::Oblique => "oblique",
+                },
+            )
+            .attr("font-weight", variant.weight.to_number() as f64)
+            .attr("xml:lang", text.lang.as_str())
+            .attr("xml:space", "preserve");
+        element.attr_with("font-stretch", |attr| {
+            attr.push_num(variant.stretch.to_ratio().get() * 100.0);
+            attr.push_str("%");
+        });
+
+        self.write_fill(
+            &mut element,
+            &text.fill,
+            FillRule::default(),
+            Ratio::one(),
+            Transform::identity(),
+        );
+        if let Some(stroke) = &text.stroke {
+            self.write_stroke(&mut element, stroke, Ratio::one(), Transform::identity());
+        }
+
+        element.text(&text.text);
     }
 
     fn render_glyph(
@@ -217,4 +269,44 @@ impl SVGRenderer<'_> {
         // produced from writing the glyph definitions.
         assert!(self.glyphs.is_empty());
     }
+}
+
+/// Whether a text run can be represented reliably as ordinary SVG text.
+/// Whether a text item can be serialized as a simple editable text run.
+///
+/// This deliberately shares the compatibility gate used by the hybrid SVG
+/// exporter so that other exporters can make the same live-text decision.
+pub fn can_render_live_text(text: &TextItem) -> bool {
+    if text.text.is_empty()
+        || text.lang.dir() != Dir::LTR
+        || text.font.font().info().flags.contains(FontFlags::VARIABLE)
+        || !matches!(text.fill, Paint::Solid(_))
+        || text
+            .stroke
+            .as_ref()
+            .is_some_and(|stroke| !matches!(stroke.paint, Paint::Solid(_)))
+        || text.glyphs.iter().any(|glyph| {
+            glyph.y_advance.get() != 0.0 || !should_outline(&text.font, GlyphId(glyph.id))
+        })
+    {
+        return false;
+    }
+
+    text.text.chars().all(is_supported_live_text_char)
+}
+
+/// The initial live-text export supports Latin scripts and common punctuation.
+fn is_supported_live_text_char(ch: char) -> bool {
+    if ch.is_control() || is_default_ignorable(ch) {
+        return false;
+    }
+
+    matches!(
+        ch as u32,
+        0x0020..=0x007E
+            | 0x00A0..=0x024F
+            | 0x0300..=0x036F
+            | 0x1E00..=0x1EFF
+            | 0x2000..=0x206F
+    )
 }

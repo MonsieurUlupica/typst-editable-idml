@@ -1,38 +1,19 @@
-name: 🐞 Compiler Bug Report
-description: For bugs in the Typst compiler
-title: Write a short and descriptive title!
-labels:
-  - bug
+# Modified for Jean Porcel’s SVG fork (2026).
+name: SVG export bug
+description: Report a reproducible problem with hybrid SVG output.
+labels: [bug]
 body:
-  - type: markdown
-    attributes:
-      value: Thanks for reporting a bug in the Typst compiler. Did you [take a look](https://github.com/typst/typst/issues?q=is%3Aopen+is%3Aissue+label%3Abug) if your issue has already been filed? If so, join the discussion there! Is your issue related to Typst's web app? Please file it [here](https://github.com/typst/webapp-issues/issues) instead.
   - type: textarea
-    id: description
+    id: reproduction
     attributes:
-      label: Description
-      description: Please describe your issue. Include specific steps to reproduce it or a screenshot if the problem is with Typst's output.
-      placeholder: Terse and specific description of the bug. If possible, include (minimal) Typst code that reproduces problem. You can add a screenshot by dragging an image here.
+      label: Public reproduction
+      description: Include a small Typst source and original public SVG assets, the command and the expected versus observed output.
     validations:
       required: true
-  - type: dropdown
-    id: os
+  - type: textarea
+    id: environment
     attributes:
-      label: Operating system
-      description: Which platform did you run the compiler on?
-      multiple: true
-      options:
-        - Web app
-        - Windows
-        - Linux
-        - macOS
+      label: Environment
+      description: Fork commit, operating system, SVG editor version and installed fonts.
     validations:
-      required: false
-  - type: checkboxes
-    id: updated
-    attributes:
-      label: Typst version
-      description: Please check this box to confirm you are using the latest released version of Typst or an unreleased commit from this repository after the latest release.
-      options:
-        - label: I am using the latest version of Typst
-          required: false
+      required: true

@@ -1,17 +1,12 @@
-name: 📖 Documentation
-description: For issues with the documentation
-title: Write a short and descriptive title!
-labels:
-  - docs
+# Modified for Jean Porcel’s SVG fork (2026).
+name: Documentation improvement
+description: Report missing or unclear instructions for this SVG fork.
+labels: [documentation]
 body:
-  - type: markdown
-    attributes:
-      value: Thanks for reporting an issue with Typst's documentation. Did you [take a look](https://github.com/typst/typst/issues?q=is%3Aopen+is%3Aissue+label%3Adocs) if your issue has already been filed? If so, join the discussion there! Is your issue related to Typst's web app? Please file it [here](https://github.com/typst/webapp-issues/issues) instead.
   - type: textarea
-    id: description
+    id: documentation
     attributes:
-      label: Description
-      description: Please describe your issue.
-      placeholder: Terse and specific description of the issue. You can add a screenshot by dragging an image here.
+      label: Documentation problem
+      description: Link the section and explain what would make it clearer.
     validations:
       required: true

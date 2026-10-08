@@ -1,0 +1,16 @@
+name: SVG export checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  svg:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked -p typst-svg
+      - run: cargo test --locked -p typst-cli --test smoke

@@ -396,3 +396,11 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS WITH THE
 SOFTWARE.
 ================================================================================
+
+================================================================================
+Typst Editable SVG extension
+Project direction, editorial requirements, review and SVG editor validation: Jean Porcel.
+Development assistance credited to OpenAI Codex / GPT-6.1 Sol; see DEVELOPMENT.md.
+Based on Typst by The Typst Project Developers.
+Modifications distributed under Apache-2.0.
+================================================================================

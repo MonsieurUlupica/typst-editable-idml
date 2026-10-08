@@ -1,3 +1,4 @@
+# Modified for Jean Porcel’s Typst Editable SVG extension (2026). See DEVELOPMENT.md.
 [workspace]
 members = ["crates/*", "docs", "tests", "tests/fuzz", "tests/wrapper"]
 default-members = ["crates/typst-cli"]
@@ -9,7 +10,7 @@ rust-version = "1.92" # also change in ci.yml
 authors = ["The Typst Project Developers"]
 edition = "2024"
 homepage = "https://typst.app"
-repository = "https://github.com/typst/typst"
+repository = "https://github.com/MonsieurUlupica/typst-editable-svg"
 license = "Apache-2.0"
 categories = ["compilers"]
 keywords = ["typst"]

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="260" height="130" viewBox="0 0 260 130">
+<defs>
+<clipPath id="clip"><rect x="8" y="8" width="244" height="114" rx="12"/></clipPath>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#244956"/></marker>
+</defs>
+<g clip-path="url(#clip)">
+<rect width="260" height="130" fill="#edf3f0"/>
+<circle cx="65" cy="66" r="34" fill="#e7c66b"/>
+<circle cx="205" cy="66" r="34" fill="#83baa3"/>
+<path d="M105 66H164" stroke="#244956" stroke-width="3" marker-end="url(#arrow)"/>
+<text x="20" y="113" font-family="serif" font-size="15" fill="#244956">Texto SVG — Jean Porcel</text>
+</g>
+</svg>

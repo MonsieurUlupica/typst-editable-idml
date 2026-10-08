@@ -1,3 +1,4 @@
+// Modified for Jean Porcel’s Typst Editable SVG extension (2026). See DEVELOPMENT.md.
 //! Rendering of Typst documents into SVG images.
 
 mod format;
@@ -10,6 +11,7 @@ mod write;
 
 pub use self::format::{FORMAT, SvgFormat, SvgFormatOptions};
 pub use self::image::{WebImage, convert_image_scaling};
+pub use self::text::can_render_live_text;
 
 use std::hash::Hash;
 
@@ -30,19 +32,68 @@ use crate::paint::{GradientRef, SVGSubGradient, TilingRef};
 use crate::text::RenderedGlyph;
 use crate::write::{SvgDisplay, SvgElem, SvgTransform, SvgUrl, SvgWrite};
 
+/// How text should be represented in an SVG export.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum SvgTextMode {
+    /// Convert text to glyph outlines for consistent rendering.
+    #[default]
+    Outline,
+    /// Preserve supported text as live SVG text and outline unsupported runs.
+    Hybrid,
+}
+
 /// Export a frame into an SVG file.
-#[typst_macros::time(name = "svg")]
 pub fn svg(page: &Page, opts: &SvgOptions<Complete>) -> String {
+    svg_with_text_mode(page, opts, SvgTextMode::Outline)
+}
+
+/// Export a page into SVG with a specific text representation mode.
+#[typst_macros::time(name = "svg")]
+pub fn svg_with_text_mode(
+    page: &Page,
+    opts: &SvgOptions<Complete>,
+    text_mode: SvgTextMode,
+) -> String {
+    try_svg_with_text_mode(page, opts, text_mode, 1)
+        .map(|output| output.svg)
+        .unwrap_or_else(|_| svg(page, opts))
+}
+
+/// SVG page output together with warnings produced by hybrid export.
+#[derive(Debug)]
+pub struct SvgExport {
+    /// The serialized SVG page.
+    pub svg: String,
+    /// Warnings for SVG graphics that needed the raster fallback.
+    pub warnings: Vec<EcoString>,
+}
+
+/// Export a page into SVG, returning fallback warnings and fatal image errors.
+///
+/// `page_number` is used in diagnostics produced while importing SVG graphics.
+pub fn try_svg_with_text_mode(
+    page: &Page,
+    opts: &SvgOptions<Complete>,
+    text_mode: SvgTextMode,
+    page_number: usize,
+) -> Result<SvgExport, EcoString> {
     let (size, ts) = page_bleed(page, opts);
 
-    let mut renderer = SVGRenderer::new();
+    let mut renderer = SVGRenderer::with_text_mode(text_mode);
+    renderer.page_number = page_number;
     let mut xml = XmlWriter::new(xml_options(opts.format.pretty.v));
     let mut svg = svg_header(&mut xml, size);
 
     let state = State::new(size);
     renderer.render_page(&mut svg, &state, ts, page);
     renderer.finalize(svg);
-    xml.end_document()
+    if let Some(error) = renderer.error {
+        return Err(error);
+    }
+    Ok(SvgExport {
+        svg: xml.end_document(),
+        warnings: renderer.warnings,
+    })
 }
 
 /// Export a page into an SVG file as part of a bundle.
@@ -200,6 +251,16 @@ impl SvgOptions<Partial> {
 
 /// Renders one or multiple frames to an SVG file.
 struct SVGRenderer<'a> {
+    /// How text should be represented.
+    text_mode: SvgTextMode,
+    /// One-based page number used in diagnostics.
+    page_number: usize,
+    /// Number of imported SVGs emitted on this page.
+    svg_image_count: usize,
+    /// Warnings produced by SVG integration fallbacks.
+    warnings: Vec<EcoString>,
+    /// A fatal error when neither vector integration nor raster fallback works.
+    error: Option<EcoString>,
     /// The document's introspector, if we're writing an HTML frame.
     link_resolver: Option<Tracked<'a, LateLinkResolver<'a>>>,
     /// Prepared glyphs.
@@ -279,12 +340,30 @@ impl State {
 impl<'a> SVGRenderer<'a> {
     /// Create a new SVG renderer with empty glyph and clip path.
     fn new() -> Self {
-        Self::with_options(None)
+        Self::with_text_mode(SvgTextMode::Outline)
+    }
+
+    /// Create a new SVG renderer with the given text mode.
+    fn with_text_mode(text_mode: SvgTextMode) -> Self {
+        Self::with_options_and_text_mode(None, text_mode)
     }
 
     /// Create a new SVG renderer with the given configuration.
     fn with_options(link_resolver: Option<Tracked<'a, LateLinkResolver<'a>>>) -> Self {
+        Self::with_options_and_text_mode(link_resolver, SvgTextMode::Outline)
+    }
+
+    /// Create a renderer with link and text options.
+    fn with_options_and_text_mode(
+        link_resolver: Option<Tracked<'a, LateLinkResolver<'a>>>,
+        text_mode: SvgTextMode,
+    ) -> Self {
         SVGRenderer {
+            text_mode,
+            page_number: 1,
+            svg_image_count: 0,
+            warnings: Vec::new(),
+            error: None,
             link_resolver,
             glyphs: Deduplicator::new('g'),
             clip_paths: Deduplicator::new('c'),
@@ -422,7 +501,7 @@ impl<'a> SVGRenderer<'a> {
     }
 
     /// Finalize the SVG file. This must be called after all rendering is done.
-    fn finalize(mut self, mut svg: SvgElem) {
+    fn finalize(&mut self, mut svg: SvgElem) {
         self.write_glyph_defs(&mut svg);
         self.write_clip_path_defs(&mut svg);
         self.write_gradients(&mut svg);
