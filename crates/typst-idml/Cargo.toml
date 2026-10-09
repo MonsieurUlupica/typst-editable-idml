@@ -1,0 +1,31 @@
+[package]
+name = "typst-idml"
+description = "IDML exporter for Typst."
+version = { workspace = true }
+rust-version = { workspace = true }
+authors = ["Jean Paolo Porcel Inquillo"]
+edition = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
+categories = ["rendering"]
+keywords = ["typst", "idml", "indesign"]
+
+[dependencies]
+typst-layout = { workspace = true }
+typst-library = { workspace = true }
+typst-svg = { workspace = true }
+ttf-parser = { workspace = true }
+typst-macros = { workspace = true }
+typst-syntax = { workspace = true }
+typst-utils = { workspace = true }
+ecow = { workspace = true }
+image = { workspace = true }
+zip = { workspace = true }
+quick-xml = "0.38"
+
+[dev-dependencies]
+roxmltree = { workspace = true }
+
+[lints]
+workspace = true

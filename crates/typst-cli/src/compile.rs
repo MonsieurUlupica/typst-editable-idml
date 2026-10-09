@@ -25,7 +25,7 @@ use typst_utils::Scalar;
 
 use crate::args::{
     self, CompileArgs, CompileCommand, DepsFormat, DiagnosticFormat, Input, Output,
-    OutputFormat, WatchCommand,
+    OutputFormat, SvgTextOutput, WatchCommand,
 };
 use crate::deps::write_deps;
 use crate::watch::Status;
@@ -64,6 +64,10 @@ pub struct CompileConfig {
     pub output_format: OutputFormat,
     /// Whether to make the serialized document pretty.
     pub pretty: Option<bool>,
+    /// How text is represented in SVG output.
+    pub svg_text_mode: typst_svg::SvgTextMode,
+    /// Whether IDML output should include a sibling-links handoff directory.
+    pub idml_package: bool,
     /// Which pages to export.
     pub pages: Option<PageRanges>,
     /// The document's creation date formatted as a UNIX timestamp, with UTC suffix.
@@ -113,11 +117,14 @@ impl CompileConfig {
 
         let output_format = if let Some(specified) = args.format {
             specified
+        } else if args.idml_package {
+            OutputFormat::Idml
         } else if let Some(Output::Path(output)) = &args.output {
             match output.extension() {
                 Some(ext) if ext.eq_ignore_ascii_case("pdf") => OutputFormat::Pdf,
                 Some(ext) if ext.eq_ignore_ascii_case("png") => OutputFormat::Png,
                 Some(ext) if ext.eq_ignore_ascii_case("svg") => OutputFormat::Svg,
+                Some(ext) if ext.eq_ignore_ascii_case("idml") => OutputFormat::Idml,
                 Some(ext) if ext.eq_ignore_ascii_case("html") => OutputFormat::Html,
                 _ => bail!(
                     "could not infer output format for path {}.\n\
@@ -129,19 +136,37 @@ impl CompileConfig {
             OutputFormat::Pdf
         };
 
+        let svg_text_mode = match args.svg_text {
+            Some(_) if output_format != OutputFormat::Svg => {
+                bail!("`--svg-text` can only be used with SVG output")
+            }
+            Some(SvgTextOutput::Outline) | None => typst_svg::SvgTextMode::Outline,
+            Some(SvgTextOutput::Hybrid) => typst_svg::SvgTextMode::Hybrid,
+        };
+
+        if args.idml_package && output_format != OutputFormat::Idml {
+            bail!("`--idml-package` can only be used with IDML output");
+        }
+        if args.idml_package && matches!(&args.output, Some(Output::Stdout)) {
+            bail!("`--idml-package` requires an output directory, not stdout");
+        }
+
         let output = args.output.clone().unwrap_or_else(|| {
             let Input::Path(path) = &input else {
                 panic!("output must be specified when input is from stdin, as guarded by the CLI");
             };
-            Output::Path(path.with_extension(
+            Output::Path(path.with_extension(if args.idml_package {
+                "idml-package"
+            } else {
                 match output_format {
                     OutputFormat::Pdf => "pdf",
                     OutputFormat::Png => "png",
                     OutputFormat::Svg => "svg",
+                    OutputFormat::Idml => "idml",
                     OutputFormat::Html => "html",
                     OutputFormat::Bundle => "",
-                },
-            ))
+                }
+            }))
         });
 
         let pages = args.pages.as_ref().map(|export_ranges| {
@@ -257,6 +282,8 @@ impl CompileConfig {
             output,
             output_format,
             pretty: args.pretty,
+            svg_text_mode,
+            idml_package: args.idml_package,
             pages,
             pdf_standards,
             tagged,
@@ -346,10 +373,11 @@ fn compile_and_export(
     config: &mut CompileConfig,
 ) -> Warned<SourceResult<Vec<Output>>> {
     match config.output_format {
-        OutputFormat::Pdf | OutputFormat::Png | OutputFormat::Svg => {
-            typst::compile::<PagedDocument>(world)
-                .and_then(|document| export_paged(&document, config))
-        }
+        OutputFormat::Pdf
+        | OutputFormat::Png
+        | OutputFormat::Svg
+        | OutputFormat::Idml => typst::compile::<PagedDocument>(world)
+            .and_then(|document| export_paged(world, &document, config)),
         OutputFormat::Html => {
             let Warned { output, warnings } = typst::compile::<HtmlDocument>(world);
             let result = output.and_then(|document| export_html(&document, config));
@@ -381,6 +409,7 @@ fn export_html(document: &HtmlDocument, config: &CompileConfig) -> SourceResult<
 
 /// Export to a paged target format.
 fn export_paged(
+    world: &SystemWorld,
     document: &PagedDocument,
     config: &CompileConfig,
 ) -> Warned<SourceResult<Vec<Output>>> {
@@ -391,11 +420,133 @@ fn export_paged(
         OutputFormat::Png => export_image(document, config, ImageExportFormat::Png)
             .at(Span::detached())
             .into(),
-        OutputFormat::Svg => export_image(document, config, ImageExportFormat::Svg)
-            .at(Span::detached())
-            .into(),
+        OutputFormat::Svg => export_svg(document, config),
+        OutputFormat::Idml => export_idml(world, document, config),
         OutputFormat::Html | OutputFormat::Bundle => unreachable!(),
     }
+}
+
+/// Export all selected pages into one IDML package.
+fn export_idml(
+    world: &SystemWorld,
+    document: &PagedDocument,
+    config: &CompileConfig,
+) -> Warned<SourceResult<Vec<Output>>> {
+    let options = typst_idml::IdmlOptions { pages: config.pages.clone() };
+    if !config.idml_package {
+        return typst_idml::idml(document, &options).and_then(|bytes| {
+            config
+                .output
+                .write(&bytes)
+                .map_err(|err| eco_format!("failed to write IDML file ({err})"))
+                .at(Span::detached())?;
+            Ok(vec![config.output.clone()])
+        });
+    }
+
+    let Output::Path(package_root) = &config.output else {
+        return idml_export_error("`--idml-package` requires an output directory");
+    };
+    let Input::Path(input) = &config.input else {
+        return idml_export_error("`--idml-package` requires a file input");
+    };
+    let Some(input_name) = input.file_name() else {
+        return idml_export_error("could not determine the input file name");
+    };
+    let document_name = Path::new(input_name).with_extension("idml");
+    let links_dir = package_root.join("Links");
+    if let Err(err) = std::fs::create_dir_all(&links_dir) {
+        return idml_export_error(&eco_format!(
+            "failed to create package Links directory ({err})"
+        ));
+    }
+
+    typst_idml::idml_package_with_world(document, &options, world).and_then(|package| {
+        let document_path = package_root.join(&document_name);
+        std::fs::create_dir_all(package_root)
+            .map_err(|err| eco_format!("failed to create IDML package directory ({err})"))
+            .at(Span::detached())?;
+        std::fs::write(&document_path, &package.document)
+            .map_err(|err| eco_format!("failed to write IDML document ({err})"))
+            .at(Span::detached())?;
+
+        let mut outputs = vec![Output::Path(document_path)];
+        for (name, contents) in package.links {
+            let path = links_dir.join(name);
+            std::fs::write(&path, contents)
+                .map_err(|err| eco_format!("failed to write linked asset ({err})"))
+                .at(Span::detached())?;
+            outputs.push(Output::Path(path));
+        }
+
+        let document_fonts_dir = package_root.join("Document fonts");
+        std::fs::create_dir_all(&document_fonts_dir)
+            .map_err(|err| eco_format!("failed to create Document fonts directory ({err})"))
+            .at(Span::detached())?;
+        let mut report = String::from(
+            "Paquete IDML\n\nAbre el archivo IDML de esta carpeta y conserva las carpetas Links y Document fonts junto a él. InDesign carga temporalmente las fuentes de Document fonts al abrir el documento.\n\nFuentes usadas por texto Typst\n\n",
+        );
+        if package.fonts.is_empty() {
+            report.push_str("No se detectaron fuentes en los marcos de texto exportados.\n");
+        }
+        for font in package.fonts {
+            report.push_str("- ");
+            report.push_str(&font.faces.join(", "));
+            if !font.sources.is_empty() {
+                report.push_str(" (SVG: ");
+                report.push_str(
+                    &font
+                        .sources
+                        .iter()
+                        .map(|source| source.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+                report.push(')');
+            }
+            match (font.filename, font.data) {
+                (Some(name), Some(data)) => {
+                    let path = document_fonts_dir.join(name);
+                    std::fs::write(&path, data)
+                        .map_err(|err| eco_format!("failed to write packaged font ({err})"))
+                        .at(Span::detached())?;
+                    report.push_str(": copiada a Document fonts/\n");
+                    outputs.push(Output::Path(path));
+                }
+                (_, _) => {
+                    report.push_str(": no copiada");
+                    if let Some(reason) = font.omitted_reason {
+                        report.push_str(" (");
+                        report.push_str(&reason);
+                        report.push(')');
+                    }
+                    report.push('\n');
+                }
+            }
+        }
+        let report_path = package_root.join("Fuentes.txt");
+        std::fs::write(&report_path, report)
+            .map_err(|err| eco_format!("failed to write font report ({err})"))
+            .at(Span::detached())?;
+        outputs.push(Output::Path(report_path));
+
+        let instructions_path = package_root.join("LEEME.txt");
+        let instructions = format!(
+            "Paquete IDML generado por Typst.\n\nDocumento: {}\nGráficos vinculados: Links/\nFuentes permitidas: Document fonts/\nInforme de fuentes: Fuentes.txt\n\nMantén el documento IDML y las carpetas Links y Document fonts dentro de esta carpeta.\n",
+            document_name.display(),
+        );
+        std::fs::write(&instructions_path, instructions)
+            .map_err(|err| eco_format!("failed to write package instructions ({err})"))
+            .at(Span::detached())?;
+        outputs.push(Output::Path(instructions_path));
+        Ok(outputs)
+    })
+}
+
+fn idml_export_error(message: &str) -> Warned<SourceResult<Vec<Output>>> {
+    let mut errors = ecow::EcoVec::new();
+    errors.push(SourceDiagnostic::error(Span::detached(), message));
+    Warned { output: Err(errors), warnings: ecow::EcoVec::new() }
 }
 
 /// Export to a PDF.
@@ -486,7 +637,6 @@ fn convert_datetime<Tz: chrono::TimeZone>(
 #[derive(Copy, Clone)]
 enum ImageExportFormat {
     Png,
-    Svg,
 }
 
 /// Export to one or multiple images.
@@ -499,7 +649,7 @@ fn export_image(
         ImageExportFormat::Png => {
             let options =
                 png_options(config).resolve(document.options().get::<PngFormat>());
-            export_image_pages(config, document, |page, output| {
+            export_image_pages(config, document, |page, output, _page_number| {
                 let pixmap = typst_render::render(page, &options);
                 let buf = pixmap
                     .encode_png()
@@ -507,20 +657,46 @@ fn export_image(
                 output
                     .write(&buf)
                     .map_err(|err| eco_format!("failed to write PNG file ({err})"))?;
-                Ok(())
+                Ok(Vec::new())
             })
+            .map(|(outputs, _warnings)| outputs)
         }
-        ImageExportFormat::Svg => {
-            let options =
-                svg_options(config).resolve(document.options().get::<SvgFormat>());
-            export_image_pages(config, document, |page, output| {
-                let svg = typst_svg::svg(page, &options);
-                output
-                    .write(svg.as_bytes())
-                    .map_err(|err| eco_format!("failed to write SVG file ({err})"))?;
-                Ok(())
-            })
-        }
+    }
+}
+
+/// Export SVG pages, propagating hybrid SVG fallback warnings.
+fn export_svg(
+    document: &PagedDocument,
+    config: &CompileConfig,
+) -> Warned<SourceResult<Vec<Output>>> {
+    let options = svg_options(config).resolve(document.options().get::<SvgFormat>());
+    match export_image_pages(config, document, |page, output, page_number| {
+        let result = typst_svg::try_svg_with_text_mode(
+            page,
+            &options,
+            config.svg_text_mode,
+            page_number,
+        )?;
+        output
+            .write(result.svg.as_bytes())
+            .map_err(|err| eco_format!("failed to write SVG file ({err})"))?;
+        Ok(result
+            .warnings
+            .into_iter()
+            .map(|warning| warning.to_string())
+            .collect())
+    }) {
+        Ok((outputs, warnings)) => Warned {
+            output: Ok(outputs),
+            warnings: warnings
+                .iter()
+                .map(|warning| typst::diag::warning!(Span::detached(), "{}", warning))
+                .collect(),
+        },
+        Err(error) => Warned {
+            output: Err(vec![typst::diag::error!(Span::detached(), "{}", error)].into()),
+            warnings: Vec::new().into(),
+        },
     }
 }
 
@@ -530,9 +706,9 @@ fn export_image_pages<F>(
     config: &CompileConfig,
     document: &PagedDocument,
     export_image_page: F,
-) -> StrResult<Vec<Output>>
+) -> StrResult<(Vec<Output>, Vec<String>)>
 where
-    F: Fn(&Page, &Output) -> StrResult<()>,
+    F: Fn(&Page, &Output, usize) -> StrResult<Vec<String>>,
     F: Send + Sync,
 {
     // Determine whether we have indexable templates in output
@@ -590,7 +766,7 @@ where
                         && config.export_cache.is_cached(*i, page)
                         && path.exists()
                     {
-                        return Ok(Output::Path(path.to_owned()));
+                        return Ok((Output::Path(path.to_owned()), Vec::new()));
                     }
 
                     Output::Path(path.to_owned())
@@ -598,11 +774,20 @@ where
                 Output::Stdout => Output::Stdout,
             };
 
-            export_image_page(page, &output)?;
+            let warnings = export_image_page(page, &output, i + 1)?;
 
-            Ok(output)
+            Ok((output, warnings))
         })
-        .collect::<StrResult<Vec<Output>>>()
+        .collect::<StrResult<Vec<_>>>()
+        .map(|results| {
+            let mut outputs = Vec::with_capacity(results.len());
+            let mut warnings = Vec::new();
+            for (output, page_warnings) in results {
+                outputs.push(output);
+                warnings.extend(page_warnings);
+            }
+            (outputs, warnings)
+        })
 }
 
 mod output_template {
@@ -732,6 +917,15 @@ fn open_output(config: &mut CompileConfig) -> StrResult<()> {
 
     // Can't open stdout.
     let Output::Path(path) = &config.output else { return Ok(()) };
+    let package_document;
+    let path = if config.idml_package {
+        let Input::Path(input) = &config.input else { return Ok(()) };
+        let Some(name) = input.file_name() else { return Ok(()) };
+        package_document = path.join(Path::new(name).with_extension("idml"));
+        &package_document
+    } else {
+        path
+    };
 
     // Some resource openers require the path to be canonicalized.
     let path = path

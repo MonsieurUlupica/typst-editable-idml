@@ -1,10 +1,13 @@
 use std::collections::HashSet;
 use std::fmt::{self, Debug, Display, Formatter};
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use image::ImageEncoder;
 use tempfile::TempDir;
 use typst::foundations::Bytes;
+use zip_test::ZipArchive;
 
 #[test]
 fn test_help() {
@@ -22,6 +25,379 @@ fn test_compile_pdf() {
     let hello = project.write("hello.typ", format!("#set document(title: \"{title}\")"));
     exec().arg("compile").arg(&hello).must_succeed();
     project.read("hello.pdf").must_start_with("%PDF").must_contain(title);
+}
+
+#[test]
+fn test_compile_svg_hybrid_text_and_embedded_images() {
+    let project = tempfs();
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(&[255, 0, 0, 255], 1, 1, image::ExtendedColorType::Rgba8)
+        .unwrap();
+    project.write("pixel.png", png);
+
+    let input = project.write(
+        "main.typ",
+        r##"
+#set page(width: 200pt, height: 120pt)
+#set text(font: "Libertinus Serif", size: 16pt, weight: "bold", fill: red)
+#text("A & B < C — café")
+#rotate(15deg)[Rotated]
+#image("pixel.png", width: 20pt)
+#pagebreak()
+#set text(lang: "ar")
+#text("مرحبا")
+"##,
+    );
+    let output = project.resolve("page-{p}.svg");
+
+    exec()
+        .arg("compile")
+        .arg("--format=svg")
+        .arg("--svg-text=hybrid")
+        .arg(&input)
+        .arg(&output)
+        .must_succeed();
+
+    let first = project.read("page-1.svg");
+    let first = std::str::from_utf8(&first.0).unwrap();
+    let parsed = roxmltree::Document::parse(first).unwrap();
+    let texts = parsed
+        .descendants()
+        .filter(|node| node.has_tag_name("text"))
+        .collect::<Vec<_>>();
+    assert_eq!(texts.len(), 2, "both supported text runs should be live");
+    let text = texts
+        .iter()
+        .find(|node| node.text() == Some("A & B < C — café"))
+        .expect("compatible Latin text should remain unchanged");
+    assert_eq!(text.text(), Some("A & B < C — café"));
+    assert_eq!(text.attribute("font-family"), Some("Libertinus Serif"));
+    assert_eq!(text.attribute("font-weight"), Some("700"));
+    let rotated = texts
+        .iter()
+        .find(|node| node.text() == Some("Rotated"))
+        .expect("transformed text should stay live");
+    assert!(
+        rotated.ancestors().any(|node| node.attribute("transform").is_some()),
+        "transformed text should preserve its group transform"
+    );
+    assert!(first.contains("data:image/png;base64,"));
+
+    let second = project.read("page-2.svg");
+    let second = std::str::from_utf8(&second.0).unwrap();
+    roxmltree::Document::parse(second).unwrap();
+    assert!(!second.contains("<text"), "RTL text should use the outline fallback");
+}
+
+#[test]
+fn test_compile_idml_infers_format_and_packages_selected_page() {
+    let project = tempfs();
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(&[0, 160, 255, 255], 1, 1, image::ExtendedColorType::Rgba8)
+        .unwrap();
+    project.write("pixel.png", png);
+    project.write(
+        "vector.svg",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 40 20"><path d="M0 0H40V20H0Z" fill="#e65442"/><text x="2" y="15">SVG interno</text></svg>"##,
+    );
+    let input = project.write(
+        "main.typ",
+        r##"
+#set page(width: 200pt, height: 400pt)
+Omitida
+#pagebreak()
+#set text(font: "Libertinus Serif", size: 16pt, fill: rgb("#2455aa"))
+#text("Editable café & texto")
+#rotate(15deg)[Texto transformado]
+#rect(width: 8pt, height: 8pt, fill: green)
+#image("pixel.png", width: 30pt)
+#image("vector.svg", width: 40pt, height: 20pt)
+#set text(lang: "ar")
+#text("مرحبا")
+"##,
+    );
+    let output = project.resolve("selected.idml");
+
+    exec()
+        .arg("compile")
+        .arg(&input)
+        .arg(&output)
+        .arg("--pages=2")
+        .must_succeed();
+
+    let bytes = project.read("selected.idml");
+    let mut archive = ZipArchive::new(Cursor::new(bytes.0)).unwrap();
+    assert_eq!(archive.by_index(0).unwrap().name(), "mimetype");
+    assert_eq!(
+        archive.by_index(0).unwrap().compression(),
+        zip_test::CompressionMethod::Stored
+    );
+    let names = (0..archive.len())
+        .map(|index| archive.by_index(index).unwrap().name().to_owned())
+        .collect::<HashSet<_>>();
+    assert!(names.contains("mimetype"));
+    assert!(names.contains("designmap.xml"));
+    assert!(names.contains("META-INF/metadata.xml"));
+    assert!(names.contains("XML/Mapping.xml"));
+    assert_eq!(names.iter().filter(|name| name.starts_with("Spreads/")).count(), 1);
+
+    let mut story_text = String::new();
+    let mut story_self = HashSet::new();
+    let mut text_frame_stories = Vec::new();
+    let mut linked_resources = Vec::new();
+    let mut page_name = None;
+    let mut non_identity_transform = false;
+    let mut item_has_layer = false;
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).unwrap();
+        if file.name().ends_with(".xml") {
+            let is_spread = file.name().starts_with("Spreads/");
+            let mut xml = String::new();
+            file.read_to_string(&mut xml).unwrap();
+            let parsed = roxmltree::Document::parse(&xml).unwrap();
+            for node in parsed.descendants() {
+                match node.tag_name().name() {
+                    "Story" => {
+                        if let Some(id) = node.attribute("Self") {
+                            story_self.insert(id.to_owned());
+                        }
+                    }
+                    "Content" => {
+                        if let Some(value) = node.text() {
+                            story_text.push_str(value);
+                        }
+                    }
+                    "TextFrame" => {
+                        item_has_layer |= node.attribute("ItemLayer") == Some("uLayer");
+                        if let Some(id) = node.attribute("ParentStory") {
+                            text_frame_stories.push(id.to_owned());
+                        }
+                        if node.attribute("ItemTransform") != Some("1 0 0 1 0 0") {
+                            non_identity_transform = true;
+                        }
+                    }
+                    "Page" if is_spread => {
+                        page_name = node.attribute("Name").map(str::to_owned)
+                    }
+                    "Link" => {
+                        if let Some(uri) = node.attribute("LinkResourceURI") {
+                            linked_resources.push(uri.to_owned());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert_eq!(page_name.as_deref(), Some("2"));
+    assert!(story_text.contains("Editable café & texto"));
+    assert!(!story_text.contains("Omitida"));
+    assert!(!story_text.contains("مرحبا"), "complex-script fallback is outlined");
+    assert!(!text_frame_stories.is_empty(), "compatible text is live");
+    assert!(text_frame_stories.iter().all(|id| story_self.contains(id)));
+    assert!(non_identity_transform, "text transforms are preserved");
+    assert!(item_has_layer, "placed text uses the declared document layer");
+    let mut designmap = String::new();
+    archive
+        .by_name("designmap.xml")
+        .unwrap()
+        .read_to_string(&mut designmap)
+        .unwrap();
+    assert!(designmap.contains("<?aid style=\"50\""));
+    assert!(designmap.contains("ActiveLayer=\"uLayer\""));
+    assert!(!linked_resources.is_empty(), "the raster image is placed");
+    assert!(linked_resources.iter().all(|uri| {
+        uri.starts_with("file:Links/")
+            && names.contains(&format!("Links/{}", uri.trim_start_matches("file:Links/")))
+    }));
+    let svg_assets = names
+        .iter()
+        .find(|name| name.starts_with("Links/") && name.ends_with(".svg"))
+        .cloned();
+    let svg_asset = svg_assets.expect("vectors should be separate placed resources");
+    let mut svg_content = String::new();
+    for name in names
+        .iter()
+        .filter(|name| name.starts_with("Links/") && name.ends_with(".svg"))
+    {
+        archive
+            .by_name(name)
+            .unwrap()
+            .read_to_string(&mut svg_content)
+            .unwrap();
+    }
+    assert!(
+        svg_content.contains("SVG interno"),
+        "placed asset {svg_asset}: {svg_content}"
+    );
+}
+
+#[test]
+fn test_compile_idml_package_writes_relative_links_and_font_report() {
+    let project = tempfs();
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(&[0, 160, 255, 255], 1, 1, image::ExtendedColorType::Rgba8)
+        .unwrap();
+    project.write("pixel.png", png);
+    let input = project.write(
+        "main.typ",
+        "#set page(width: 200pt, height: 120pt)\n#set text(font: \"Libertinus Serif\")\nEditable\n#image(\"pixel.png\", width: 20pt)",
+    );
+    let package = project.resolve("handoff");
+
+    exec()
+        .arg("compile")
+        .arg(&input)
+        .arg(&package)
+        .arg("--idml-package")
+        .arg("--pages=1")
+        .must_succeed();
+
+    let idml = project.read("handoff/main.idml");
+    let mut archive = ZipArchive::new(Cursor::new(idml.0)).unwrap();
+    let mut names = HashSet::new();
+    let mut links = Vec::new();
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).unwrap();
+        names.insert(file.name().to_owned());
+        if file.name().ends_with(".xml") {
+            let mut xml = String::new();
+            file.read_to_string(&mut xml).unwrap();
+            let parsed = roxmltree::Document::parse(&xml).unwrap();
+            links.extend(parsed.descendants().filter_map(|node| {
+                (node.tag_name().name() == "Link")
+                    .then(|| node.attribute("LinkResourceURI"))
+                    .flatten()
+                    .map(str::to_owned)
+            }));
+        }
+    }
+    assert!(!names.iter().any(|name| name.starts_with("Links/")));
+    assert_eq!(links.len(), 1);
+    let link = links[0]
+        .strip_prefix("file:Links/")
+        .expect("package links should be relative to the Links folder");
+    assert!(project.resolve(format!("handoff/Links/{link}")).is_file());
+    project
+        .read("handoff/Fuentes.txt")
+        .must_contain("Libertinus Serif")
+        .must_contain("Fuentes usadas por los marcos de texto editables")
+        .must_contain("copiada a Document fonts/");
+    let document_fonts = project.resolve("handoff/Document fonts");
+    let packaged_fonts = std::fs::read_dir(document_fonts).unwrap().count();
+    assert!(packaged_fonts > 0, "permitted fonts should be copied beside the IDML");
+    project.read("handoff/LEEME.txt").must_contain("carpetas Links");
+}
+
+#[test]
+fn test_compile_svg_hybrid_inlines_imported_svg_vectors() {
+    let project = tempfs();
+    project.write(
+        "art.svg",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 20" width="40" height="20">
+  <defs>
+    <path id="symbol" d="M0 0H20V10H0Z"/>
+    <filter id="soft"><feGaussianBlur stdDeviation="0.3"/></filter>
+  </defs>
+  <use href="#symbol" filter="url(#soft)"/>
+  <text id="caption" x="1" y="18">SVG label</text>
+</svg>"##,
+    );
+    let input = project.write(
+        "main.typ",
+        "#set page(width: 200pt, height: 120pt)\n#image(\"art.svg\", width: 60pt, height: 30pt)\n#image(\"art.svg\", width: 60pt, height: 30pt)",
+    );
+    let output = project.resolve("inline.svg");
+
+    exec()
+        .arg("compile")
+        .arg("--format=svg")
+        .arg("--svg-text=hybrid")
+        .arg(&input)
+        .arg(&output)
+        .must_succeed();
+
+    let svg_bytes = project.read("inline.svg");
+    let svg = std::str::from_utf8(&svg_bytes.0).unwrap();
+    let document = roxmltree::Document::parse(&svg).unwrap();
+    let nested_svgs =
+        document.descendants().filter(|node| node.has_tag_name("svg")).count() - 1;
+    assert_eq!(nested_svgs, 2);
+    assert_eq!(
+        document
+            .descendants()
+            .filter(|node| node.has_tag_name("image"))
+            .count(),
+        0,
+        "the SVG artwork should be represented by its vector nodes"
+    );
+    assert_eq!(
+        document
+            .descendants()
+            .filter(|node| node.has_tag_name("text"))
+            .filter(|node| node.text() == Some("SVG label"))
+            .count(),
+        2,
+        "internal SVG text should remain editable"
+    );
+
+    let ids = document
+        .descendants()
+        .filter_map(|node| node.attribute("id"))
+        .collect::<Vec<_>>();
+    let unique = ids.iter().copied().collect::<HashSet<_>>();
+    assert_eq!(ids.len(), unique.len(), "each placement needs unique IDs");
+    for node in document.descendants() {
+        for value in node.attributes().map(|attr| attr.value()) {
+            for target in value
+                .split("url(#")
+                .skip(1)
+                .filter_map(|value| value.split_once(')').map(|(id, _)| id))
+            {
+                assert!(
+                    unique.contains(target),
+                    "unresolved SVG URL reference #{target}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_compile_svg_text_outline_is_default() {
+    let project = tempfs();
+    let input = project.write("hello.typ", "Hello, Typst!");
+    let default_output = project.resolve("default.svg");
+    let outline_output = project.resolve("outline.svg");
+
+    exec().arg("compile").arg(&input).arg(&default_output).must_succeed();
+    exec()
+        .arg("compile")
+        .arg(&input)
+        .arg(&outline_output)
+        .arg("--svg-text=outline")
+        .must_succeed();
+
+    assert_eq!(project.read("default.svg").0, project.read("outline.svg").0);
+}
+
+#[test]
+fn test_svg_text_mode_requires_svg_output() {
+    let project = tempfs();
+    let input = project.write("hello.typ", "Hello, Typst!");
+    let output = exec()
+        .arg("compile")
+        .arg(&input)
+        .arg("--format=pdf")
+        .arg("--svg-text=hybrid")
+        .must_fail();
+
+    output
+        .stderr
+        .must_contain("`--svg-text` can only be used with SVG output");
 }
 
 #[test]

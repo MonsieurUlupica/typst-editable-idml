@@ -3220,6 +3220,7 @@ dependencies = [
  "parking_lot",
  "pathdiff",
  "rayon",
+ "roxmltree 0.21.1",
  "self-replace",
  "semver",
  "serde",
@@ -3235,6 +3236,7 @@ dependencies = [
  "typst-dev-assets",
  "typst-eval",
  "typst-html",
+ "typst-idml",
  "typst-kit",
  "typst-layout",
  "typst-macros",
@@ -3369,6 +3371,24 @@ dependencies = [
  "typst-svg",
  "typst-utils",
  "unscanny",
+]
+
+[[package]]
+name = "typst-idml"
+version = "0.15.1"
+dependencies = [
+ "ecow",
+ "image",
+ "quick-xml",
+ "roxmltree 0.21.1",
+ "ttf-parser",
+ "typst-layout",
+ "typst-library",
+ "typst-macros",
+ "typst-svg",
+ "typst-syntax",
+ "typst-utils",
+ "zip",
 ]
 
 [[package]]
@@ -3597,8 +3617,11 @@ dependencies = [
  "image",
  "indexmap",
  "itoa",
+ "resvg",
+ "roxmltree 0.21.1",
  "rustc-hash",
  "ryu",
+ "tiny-skia",
  "ttf-parser",
  "typst-assets",
  "typst-layout",
@@ -3607,6 +3630,7 @@ dependencies = [
  "typst-syntax",
  "typst-timing",
  "typst-utils",
+ "usvg",
  "xmlwriter",
 ]
 

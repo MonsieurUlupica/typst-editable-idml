@@ -23,6 +23,7 @@ typst-bundle = { workspace = true }
 typst-eval = { workspace = true }
 typst-layout = { workspace = true }
 typst-html = { workspace = true }
+typst-idml = { workspace = true }
 typst-macros = { workspace = true }
 typst-pdf = { workspace = true }
 typst-render = { workspace = true }
@@ -52,6 +53,7 @@ shell-escape = { workspace = true }
 sigpipe = { workspace = true }
 tar = { workspace = true }
 tempfile = { workspace = true }
+zip_test = { workspace = true }
 toml = { workspace = true }
 xz2 = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
@@ -75,6 +77,7 @@ features = [
 typst-dev-assets = { workspace = true }
 image = { workspace = true }
 memchr = { workspace = true }
+roxmltree = { workspace = true }
 tempfile = { workspace = true }
 
 [build-dependencies]

@@ -340,8 +340,8 @@ pub struct CompileArgs {
     #[clap(value_parser = input_value_parser(), value_hint = ValueHint::FilePath)]
     pub input: Input,
 
-    /// Path to output file (PDF, PNG, SVG, or HTML). Use `-` to write output to
-    /// stdout.
+    /// Path to output file (or output directory when `--idml-package` is used).
+    /// Use `-` to write supported output to stdout.
     ///
     /// For output formats emitting one file per page (PNG & SVG), a page number
     /// template must be present if the source document renders to multiple
@@ -358,6 +358,15 @@ pub struct CompileArgs {
     /// The format of the output file, inferred from the extension by default.
     #[arg(long = "format", short = 'f')]
     pub format: Option<OutputFormat>,
+
+    /// How text is represented when exporting SVG. Only valid with SVG output.
+    #[arg(long = "svg-text", value_enum, value_name = "MODE")]
+    pub svg_text: Option<SvgTextOutput>,
+
+    /// Write an IDML handoff directory containing the document, linked artwork,
+    /// and a report of required fonts. Only valid with IDML output.
+    #[arg(long = "idml-package")]
+    pub idml_package: bool,
 
     /// World arguments.
     #[clap(flatten)]
@@ -663,14 +672,25 @@ pub enum OutputFormat {
     Pdf,
     Png,
     Svg,
+    Idml,
     Html,
     Bundle,
+}
+
+/// How text is represented in a standalone SVG export.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum SvgTextOutput {
+    /// Convert all text to glyph outlines.
+    Outline,
+    /// Keep supported text editable and outline unsupported runs.
+    Hybrid,
 }
 
 impl OutputFormat {
     /// Whether this format results in a `PagedDocument`.
     pub fn is_paged(self) -> bool {
-        matches!(self, Self::Pdf | Self::Png | Self::Svg)
+        matches!(self, Self::Pdf | Self::Png | Self::Svg | Self::Idml)
     }
 }
 

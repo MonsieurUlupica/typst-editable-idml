@@ -7,16 +7,33 @@ use crate::DedupId;
 
 pub struct SvgElem<'a> {
     xml: &'a mut XmlWriter,
+    /// Whether text whitespace is preserved inside this element.
+    preserve_whitespaces: bool,
+    /// The mode to restore after this element closes.
+    parent_preserve_whitespaces: bool,
 }
 
 impl<'a> SvgElem<'a> {
     pub fn new(xml: &'a mut XmlWriter, name: &str) -> Self {
+        Self::new_with_whitespace_mode(xml, name, false)
+    }
+
+    fn new_with_whitespace_mode(
+        xml: &'a mut XmlWriter,
+        name: &str,
+        preserve_whitespaces: bool,
+    ) -> Self {
         xml.start_element(name);
-        Self { xml }
+        xml.set_preserve_whitespaces(preserve_whitespaces);
+        Self {
+            xml,
+            preserve_whitespaces,
+            parent_preserve_whitespaces: preserve_whitespaces,
+        }
     }
 
     pub fn elem(&mut self, name: &str) -> SvgElem<'_> {
-        SvgElem::new(self.xml, name)
+        SvgElem::new_with_whitespace_mode(self.xml, name, self.preserve_whitespaces)
     }
 
     /// Creates a [`LazySvgElem`].
@@ -45,11 +62,30 @@ impl<'a> SvgElem<'a> {
         f(self);
         self
     }
+
+    /// Write escaped text content inside this element.
+    pub fn text(&mut self, value: &str) -> &mut Self {
+        // Prevent the serializer's pretty-print indentation from becoming
+        // meaningful whitespace inside SVG text and style nodes.
+        self.preserve_whitespaces = true;
+        self.xml.set_preserve_whitespaces(true);
+        if value.contains('&') {
+            // `xmlwriter` escapes `<` in text nodes, but leaves ampersands
+            // untouched so callers can write entities. Escape them here to
+            // preserve arbitrary Typst text as valid XML.
+            let escaped = value.replace('&', "&amp;");
+            self.xml.write_text(&escaped);
+        } else {
+            self.xml.write_text(value);
+        }
+        self
+    }
 }
 
 impl Drop for SvgElem<'_> {
     fn drop(&mut self) {
         self.xml.end_element();
+        self.xml.set_preserve_whitespaces(self.parent_preserve_whitespaces);
     }
 }
 

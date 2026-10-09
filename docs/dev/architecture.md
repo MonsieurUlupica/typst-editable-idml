@@ -155,6 +155,10 @@ format.
   some complex compiler work because the export will start with `Content`
   instead of `Frames` (layout is the browser's job).
 
+The standalone SVG exporter can optionally retain supported text as live SVG
+text for editing in vector editors. See [the Illustrator-oriented SVG export
+guide](illustrator-svg.md) for its scope and CLI options.
+
 
 ## IDE
 The `crates/typst-ide` crate implements IDE functionality for Typst. It
